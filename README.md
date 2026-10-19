@@ -29,6 +29,16 @@ To preview without deleting anything:
 .\DiscordCacheCleaner.ps1 -DryRun
 ```
 
+## Run directly from PowerShell
+
+Paste this command into PowerShell to run the script without saving a `.ps1` file:
+
+```powershell
+irm https://raw.githubusercontent.com/perkset/Discord-Cache-Cleaner/main/DiscordCacheCleaner.ps1 -ErrorAction Stop | iex
+```
+
+This runs the current version from GitHub. Press Enter when prompted to close Discord and confirm the cleanup.
+
 ## Download from PowerShell
 
 You can download the script from GitHub without opening a browser. Use a folder where `DiscordCacheCleaner.ps1` does not already exist:
