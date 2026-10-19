@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-Discord Cache Cleaner 1.0.3 - self-contained Windows PowerShell 5.1/7 script.
+Discord Cache Cleaner 1.0.4 - self-contained Windows PowerShell 5.1/7 script.
 Usage: .\DiscordCacheCleaner.ps1 [-Channel Stable|PTB|Canary] [-DryRun]
 No sibling files, external downloads or administrator rights required.
 
@@ -345,8 +345,24 @@ function Request-DiscordClose {
         return $false
     }
     if (-not $PSCmdlet.ShouldProcess($Channel, 'Stop only the verified Discord processes shown by this client')) { return $false }
-    foreach ($target in $targets) { Stop-VerifiedDiscordProcess $target }
-    Assert-DiscordStopped
+    foreach ($target in $targets) {
+        try { Stop-VerifiedDiscordProcess $target }
+        catch {
+            # Closing the main process can make a helper exit before its turn.
+            # Windows may deny access to that exiting process. The check below
+            # must still confirm that every Discord process is gone.
+            $cause = $_.Exception.GetBaseException()
+            if ($cause -isnot [ComponentModel.Win32Exception] -or $cause.NativeErrorCode -ne 5) { throw }
+            Write-Verbose 'Access denied while closing a Discord process; checking application state.'
+        }
+    }
+    for ($attempt = 0; ; $attempt++) {
+        try { Assert-DiscordStopped; break }
+        catch {
+            if ($attempt -ge 19) { throw 'Discord could not be confirmed closed. Quit it from the system tray, wait for any updates to finish, and retry. No cache files were deleted.' }
+            Start-Sleep -Milliseconds 100
+        }
+    }
     Write-Host 'Discord is closed. Checking the cache again.'
     return $true
 }
@@ -449,7 +465,7 @@ function Invoke-CacheCleanup {
         Assert-DiscordStopped
         $journal = New-CacheJournal $session
         $result.JournalPath = $journal.Path
-        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.3'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
+        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.4'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
         foreach ($entry in @($entries | Where-Object { -not $_.Directory })) {
             Assert-DiscordStopped
             Write-CacheJournal $journal ([ordered]@{ Event = 'Deleting'; Index = $result.DeletedFiles + 1 })
