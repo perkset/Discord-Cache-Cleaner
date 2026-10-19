@@ -6,9 +6,6 @@ A simple PowerShell script that clears Discord's HTTP cache on Windows.
 
 Discord keeps local copies of images and other web resources so it does not have to download them every time. Clearing these files can free up disk space and is a troubleshooting step for loading or display problems. [Discord's troubleshooting guide](https://support.discord.com/hc/en-us/articles/31623498041623-Discord-Troubleshooting-Guide) includes cache clearing.
 
-It is not a general speed boost. If Discord works fine and you have enough disk space, you probably do not need to clear it.
-
-After cleaning, Discord downloads needed resources again. The first use may be slower and use more data. The cache will grow again, and clearing it does not guarantee lower RAM or CPU usage.
 
 ## How to use
 
