@@ -11,7 +11,7 @@ Clearing cache can free up disk space and help with loading or display problems.
 Paste this into PowerShell to run the latest version from GitHub:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/perkset/Discord-Cache-Cleaner/main/DiscordCacheCleaner.ps1 -ErrorAction Stop)))
+irm https://raw.githubusercontent.com/perkset/Discord-Cache-Cleaner/main/DiscordCacheCleaner.ps1 -ErrorAction Stop | iex
 ```
 
 Follow the prompts. Closing Discord ends active calls and streams. Wait for any Discord updates to finish first.
