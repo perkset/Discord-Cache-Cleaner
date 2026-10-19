@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-Discord Cache Cleaner 1.0.1 - self-contained Windows PowerShell 5.1/7 script.
+Discord Cache Cleaner 1.0.3 - self-contained Windows PowerShell 5.1/7 script.
 Usage: .\DiscordCacheCleaner.ps1 [-Channel Stable|PTB|Canary] [-DryRun]
 No sibling files, external downloads or administrator rights required.
 
@@ -34,10 +34,9 @@ param(
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-if ($env:OS -ne 'Windows_NT') { throw 'Windows 10 or 11 is required.' }
 
 function Initialize-CacheNative {
-    if ('DiscordCacheCleanerV101.CacheSession' -as [type]) { return }
+    if ('DiscordCacheCleanerV103.CacheSession' -as [type]) { return }
     Add-Type -TypeDefinition @'
 // Windows-only handles. No cache content reads, recursive deletion or ACL changes.
 using System;
@@ -47,7 +46,55 @@ using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace DiscordCacheCleanerV101 {
+namespace DiscordCacheCleanerV103 {
+    public static class ProcessCloser {
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern SafeWaitHandle OpenProcess(uint access, bool inherit, int id);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        private static extern bool QueryFullProcessImageNameW(SafeWaitHandle handle, uint flags,
+            System.Text.StringBuilder path, ref int size);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool GetProcessTimes(SafeWaitHandle handle,
+            out System.Runtime.InteropServices.ComTypes.FILETIME creation,
+            out System.Runtime.InteropServices.ComTypes.FILETIME exit,
+            out System.Runtime.InteropServices.ComTypes.FILETIME kernel,
+            out System.Runtime.InteropServices.ComTypes.FILETIME user);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool TerminateProcess(SafeWaitHandle handle, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+
+        public static void Stop(int id, long expectedCreation, string expectedPath) {
+            // The retained handle identifies the original process even if its PID is reused.
+            using (SafeWaitHandle handle = OpenProcess(0x00101001u, false, id)) {
+                if (handle.IsInvalid) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 87) return; // Process already exited.
+                    throw new Win32Exception(error);
+                }
+                if (WaitForSingleObject(handle, 0) == 0) return;
+                var path = new System.Text.StringBuilder(4096);
+                int size = path.Capacity;
+                System.Runtime.InteropServices.ComTypes.FILETIME creation, exit, kernel, user;
+                if (!QueryFullProcessImageNameW(handle, 0, path, ref size) ||
+                    !GetProcessTimes(handle, out creation, out exit, out kernel, out user))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (WaitForSingleObject(handle, 0) == 0) return;
+                    throw new Win32Exception(error);
+                }
+                long stamp = ((long)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+                if (stamp != expectedCreation || !String.Equals(path.ToString(), expectedPath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Discord process changed. Nothing was stopped through this handle.");
+                if (!TerminateProcess(handle, 0)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (WaitForSingleObject(handle, 0) != 0) throw new Win32Exception(error);
+                }
+                if (WaitForSingleObject(handle, 10000) != 0) throw new IOException("Discord did not stop in time.");
+            }
+        }
+    }
+
     public sealed class Entry {
         public string Path;
         public bool Directory;
@@ -247,6 +294,63 @@ function Assert-DiscordStopped {
     }
 }
 
+function Get-DiscordCloseTargets {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('Stable', 'PTB', 'Canary')][string]$Channel)
+    $definition = Get-DiscordChannels | Where-Object { $_.Channel -eq $Channel }
+    $root = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA $definition.Folder))
+    $updaterRoots = @(Get-DiscordChannels | ForEach-Object { (Join-Path $env:LOCALAPPDATA $_.Folder).TrimEnd('\') + '\' })
+    $targets = @()
+    foreach ($process in @(Get-Process -ErrorAction Stop)) {
+        if ($process.ProcessName -eq 'Update') {
+            $updaterPath = $null
+            try { $updaterPath = $process.Path } catch { throw 'An updater cannot be identified. Close it manually before continuing.' }
+            if (-not $updaterPath) { throw 'An updater cannot be identified. Close it manually before continuing.' }
+            foreach ($updaterRoot in $updaterRoots) {
+                if ($updaterPath.StartsWith($updaterRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Discord is updating. Wait for it to finish; the updater will not be stopped.' }
+            }
+        }
+        if ($process.ProcessName -notlike 'Discord*') { continue }
+        if ($process.ProcessName -ine $definition.ProcessName) { throw 'Another Discord client or helper is open. Quit it manually before continuing.' }
+        $path = $process.Path
+        if (-not $path) { throw 'Discord executable path is unavailable. Quit Discord manually.' }
+        $directory = [IO.Path]::GetDirectoryName($path)
+        if (-not $directory -or -not ([IO.Path]::GetDirectoryName($directory)).Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            -not ([IO.Path]::GetFileName($directory)).StartsWith('app-', [StringComparison]::OrdinalIgnoreCase) -or
+            [IO.Path]::GetFileName($path) -ine ($definition.ProcessName + '.exe') -or -not (Test-SafeDirectory $directory)) {
+            throw 'Discord is not in a verified standard location. Quit it manually.'
+        }
+        $file = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked Discord executable refused. Quit Discord manually.' }
+        $targets += [pscustomobject]@{ Id = $process.Id; Path = $path; CreationFileTime = $process.StartTime.ToUniversalTime().ToFileTimeUtc() }
+    }
+    if ($targets.Count -eq 0) { throw 'No verified Discord processes can be stopped automatically. Close Discord and its updater manually.' }
+    $targets
+}
+
+function Stop-VerifiedDiscordProcess {
+    param([Parameter(Mandatory)]$Target)
+    Initialize-CacheNative
+    [DiscordCacheCleanerV103.ProcessCloser]::Stop($Target.Id, $Target.CreationFileTime, $Target.Path)
+}
+
+function Request-DiscordClose {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param([Parameter(Mandatory)][ValidateSet('Stable', 'PTB', 'Canary')][string]$Channel)
+    $targets = @(Get-DiscordCloseTargets $Channel)
+    if ($WhatIfPreference) { $null = $PSCmdlet.ShouldProcess($Channel, 'Stop verified Discord processes'); return $false }
+    Write-Host 'Discord is open. Stopping it will end calls/streams and may discard unsaved drafts.'
+    if ((Read-Host 'Press Enter to close Discord, or type anything to cancel') -cne '') {
+        Write-Host 'Cancelled. Discord was not stopped and cache was not deleted.'
+        return $false
+    }
+    if (-not $PSCmdlet.ShouldProcess($Channel, 'Stop only the verified Discord processes shown by this client')) { return $false }
+    foreach ($target in $targets) { Stop-VerifiedDiscordProcess $target }
+    Assert-DiscordStopped
+    Write-Host 'Discord is closed. Checking the cache again.'
+    return $true
+}
+
 function Get-CacheTreeMetadata {
     param([Parameter(Mandatory)][string]$Root)
     if (-not (Test-SafeDirectory $Root)) { throw 'Cache is missing, inaccessible or traverses a reparse point.' }
@@ -336,7 +440,7 @@ function Invoke-CacheCleanup {
     if (-not $PSCmdlet.ShouldProcess($fresh.Root, 'Permanently delete planned HTTP cache files (no content rollback)')) { return }
     Assert-DiscordStopped
     Initialize-CacheNative
-    $session = New-Object DiscordCacheCleanerV101.CacheSession
+    $session = New-Object DiscordCacheCleanerV103.CacheSession
     $journal = $null
     $result = [pscustomobject]@{ Status = 'Aborted'; DeletedFiles = 0; DeletedLogicalBytes = [long]0; JournalPath = $null; Error = $null }
     try {
@@ -345,7 +449,7 @@ function Invoke-CacheCleanup {
         Assert-DiscordStopped
         $journal = New-CacheJournal $session
         $result.JournalPath = $journal.Path
-        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.1'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
+        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.3'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
         foreach ($entry in @($entries | Where-Object { -not $_.Directory })) {
             Assert-DiscordStopped
             Write-CacheJournal $journal ([ordered]@{ Event = 'Deleting'; Index = $result.DeletedFiles + 1 })
@@ -371,40 +475,62 @@ function Invoke-CacheCleanup {
     $result
 }
 
-Write-Host "`nDISCORD CACHE CLEANER"
-if (-not $Channel) {
-    $installed = @(Get-DiscordInstallation | Where-Object { $_.Detected })
-    if ($installed.Count -eq 0) { throw 'No standard Discord installation found. Nothing changed.' }
-    if ($installed.Count -eq 1) { $Channel = $installed[0].Channel }
-    else {
-        Write-Host ('Detected: ' + (($installed | ForEach-Object { $_.Channel }) -join ', '))
-        $Channel = Read-Host 'Enter the Discord channel to clean, or press Enter to cancel'
-        if (-not $Channel) { Write-Host 'Cancelled.'; return }
-        if ($Channel -notin @($installed | ForEach-Object { $_.Channel })) { throw 'Select one of the detected channels. Nothing changed.' }
+function Invoke-DiscordCacheCleaner {
+    param([string]$Channel, [switch]$DryRun)
+    if ($env:OS -ne 'Windows_NT') { throw 'Windows 10 or 11 is required.' }
+    Write-Host "`nDISCORD CACHE CLEANER"
+    if (-not $Channel) {
+        $installed = @(Get-DiscordInstallation | Where-Object { $_.Detected })
+        if ($installed.Count -eq 0) { throw 'No standard Discord installation found. Nothing changed.' }
+        if ($installed.Count -eq 1) { $Channel = $installed[0].Channel }
+        else {
+            Write-Host ('Detected: ' + (($installed | ForEach-Object { $_.Channel }) -join ', '))
+            $Channel = Read-Host 'Enter the Discord channel to clean, or press Enter to cancel'
+            if (-not $Channel) { Write-Host 'Cancelled.'; return }
+            if ($Channel -notin @($installed | ForEach-Object { $_.Channel })) { throw 'Select one of the detected channels. Nothing changed.' }
+        }
+    }
+
+    $plan = Get-CachePlan -Channel $Channel
+    Write-Host ('Discord: {0}' -f $plan.Channel)
+    Write-Host ('Cache: {0}' -f $plan.Root)
+    Write-Host ('Found: {0} files, {1:N2} MiB' -f $plan.FileCount, ($plan.LogicalBytes / 1MB))
+    Write-Host 'Only HTTP cache files are removed. Settings and login data are excluded.'
+    Write-Host 'Deleted cache cannot be restored. No permanent RAM or CPU saving is promised.'
+
+    if ($DryRun -or $WhatIfPreference) {
+        Write-Host ('Status: ' + $plan.Reason)
+        Write-Host 'Preview only. Nothing will be deleted or logged.'
+        return
+    }
+    if ($plan.FileCount -eq 0) { Write-Host 'Cache is already empty. Nothing to clean.'; return }
+    if (-not $plan.Ready) {
+        Write-Host ('Status: ' + $plan.Reason)
+        if (-not (Request-DiscordClose -Channel $Channel -Confirm:$false)) { return }
+        $plan = Get-CachePlan -Channel $Channel
+        if (-not $plan.Ready) { throw $plan.Reason }
+        Write-Host ('Updated cache: {0} files, {1:N2} MiB' -f $plan.FileCount, ($plan.LogicalBytes / 1MB))
+        if ($plan.FileCount -eq 0) { Write-Host 'Cache is already empty. Nothing to clean.'; return }
+    }
+    if ((Read-Host 'Press Enter to permanently delete these cache files, or type anything to cancel') -cne '') {
+        Write-Host 'Cancelled. No cache files were deleted.'
+        return
+    }
+
+    $result = Invoke-CacheCleanup -Plan $plan -Confirm:$false
+    Write-Host ('{0}: {1} files, {2:N2} MiB logical file size.' -f $result.Status, $result.DeletedFiles, ($result.DeletedLogicalBytes / 1MB))
+    if ($result.JournalPath) { Write-Host ('Log: ' + $result.JournalPath) }
+    if ($result.Status -notin @('Completed', 'NoOp')) { throw $result.Error }
+    Write-Host 'Done. You can reopen Discord. Cache will be recreated as needed.'
+}
+
+try {
+    Invoke-DiscordCacheCleaner -Channel $Channel -DryRun:$DryRun
+} catch {
+    Write-Host ('Stopped: ' + $_.Exception.Message) -ForegroundColor Red
+    throw
+} finally {
+    if (-not $DryRun -and -not $WhatIfPreference) {
+        $null = Read-Host 'Press Enter to exit'
     }
 }
-
-$plan = Get-CachePlan -Channel $Channel
-Write-Host ('Discord: {0}' -f $plan.Channel)
-Write-Host ('Cache: {0}' -f $plan.Root)
-Write-Host ('Found: {0} files, {1:N2} MiB' -f $plan.FileCount, ($plan.LogicalBytes / 1MB))
-Write-Host 'Only HTTP cache files are removed. Settings and login data are excluded.'
-Write-Host 'Deleted cache cannot be restored. No permanent RAM or CPU saving is promised.'
-
-if ($DryRun -or $WhatIfPreference) {
-    Write-Host ('Status: ' + $plan.Reason)
-    Write-Host 'Preview only. Nothing will be deleted or logged.'
-    return
-}
-if (-not $plan.Ready) { throw $plan.Reason }
-if ($plan.FileCount -eq 0) { Write-Host 'Cache is already empty. Nothing to clean.'; return }
-if ((Read-Host 'Type CLEAN to permanently delete these cache files, or press Enter to cancel') -cne 'CLEAN') {
-    Write-Host 'Cancelled. Nothing changed.'
-    return
-}
-
-$result = Invoke-CacheCleanup -Plan $plan -Confirm:$false
-Write-Host ('{0}: {1} files, {2:N2} MiB logical file size.' -f $result.Status, $result.DeletedFiles, ($result.DeletedLogicalBytes / 1MB))
-if ($result.JournalPath) { Write-Host ('Log: ' + $result.JournalPath) }
-if ($result.Status -notin @('Completed', 'NoOp')) { throw $result.Error }
-Write-Host 'Done. You can reopen Discord. Cache will be recreated as needed.'
