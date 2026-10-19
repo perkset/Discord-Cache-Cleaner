@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-Discord Cache Cleaner 1.0.4 - self-contained Windows PowerShell 5.1/7 script.
+Discord Cache Cleaner 1.0.5 - self-contained Windows PowerShell 5.1/7 script.
 Usage: .\DiscordCacheCleaner.ps1 [-Channel Stable|PTB|Canary] [-DryRun]
 No sibling files, external downloads or administrator rights required.
 
@@ -29,7 +29,7 @@ SOFTWARE.
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('Stable', 'PTB', 'Canary')][string]$Channel,
+    [ValidateSet('', 'Stable', 'PTB', 'Canary')][string]$Channel,
     [switch]$DryRun
 )
 Set-StrictMode -Version 2.0
@@ -465,7 +465,7 @@ function Invoke-CacheCleanup {
         Assert-DiscordStopped
         $journal = New-CacheJournal $session
         $result.JournalPath = $journal.Path
-        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.4'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
+        Write-CacheJournal $journal ([ordered]@{ Event = 'Started'; Utc = [DateTime]::UtcNow.ToString('o'); Version = '1.0.5'; Channel = $fresh.Channel; PlannedFiles = $fresh.FileCount; PlannedLogicalBytes = $fresh.LogicalBytes; Fingerprint = $fresh.Fingerprint; Irreversible = $true })
         foreach ($entry in @($entries | Where-Object { -not $_.Directory })) {
             Assert-DiscordStopped
             Write-CacheJournal $journal ([ordered]@{ Event = 'Deleting'; Index = $result.DeletedFiles + 1 })
